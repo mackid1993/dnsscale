@@ -54,8 +54,11 @@ type CloudflareConfig struct {
 
 // SSLConfig holds SSL certificate configuration
 type SSLConfig struct {
-	Enabled bool   `mapstructure:"enabled" yaml:"enabled"`
-	Email   string `mapstructure:"email" yaml:"email"`
+	Enabled                  bool     `mapstructure:"enabled" yaml:"enabled"`
+	Email                    string   `mapstructure:"email" yaml:"email"`
+	DNSResolvers             []string `mapstructure:"dns_resolvers" yaml:"dns_resolvers"`
+	PropagationTimeout       int      `mapstructure:"propagation_timeout" yaml:"propagation_timeout"`
+	DisablePropagationCheck  bool     `mapstructure:"disable_propagation_check" yaml:"disable_propagation_check"`
 }
 
 // AppConfig holds general application configuration
@@ -153,6 +156,29 @@ func (c *Config) Validate() error {
 		// Basic email validation
 		if !strings.Contains(c.SSL.Email, "@") || !strings.Contains(c.SSL.Email, ".") {
 			return fmt.Errorf("ssl.email must be a valid email address")
+		}
+
+		// Set defaults for DNS resolver configuration
+		if len(c.SSL.DNSResolvers) == 0 {
+			c.SSL.DNSResolvers = []string{"1.1.1.1:53", "8.8.8.8:53"}
+		}
+		if c.SSL.PropagationTimeout <= 0 {
+			c.SSL.PropagationTimeout = 120
+		}
+
+		// Validate DNS resolvers format
+		for _, resolver := range c.SSL.DNSResolvers {
+			if !strings.Contains(resolver, ":") {
+				return fmt.Errorf("ssl.dns_resolvers must include port (e.g., '1.1.1.1:53'), got: %s", resolver)
+			}
+		}
+
+		// Validate propagation timeout
+		if c.SSL.PropagationTimeout < 30 {
+			return fmt.Errorf("ssl.propagation_timeout must be at least 30 seconds, got: %d", c.SSL.PropagationTimeout)
+		}
+		if c.SSL.PropagationTimeout > 3600 {
+			return fmt.Errorf("ssl.propagation_timeout must be at most 3600 seconds (1 hour), got: %d", c.SSL.PropagationTimeout)
 		}
 	}
 

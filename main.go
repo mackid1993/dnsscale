@@ -477,48 +477,52 @@ func (r *DNSReconciler) shouldManageNode(node TailscaleNode) bool {
 	return true
 }
 
-// waitForDNSPropagation checks if DNS record has propagated using Cloudflare's 1.1.1.1 resolver
+// waitForDNSPropagation checks if DNS record has propagated using configured resolvers
+// It keeps trying until success - no timeout
 func (r *DNSReconciler) waitForDNSPropagation(recordName, expectedIP string) error {
-	resolver := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{
-				Timeout: time.Second * 10,
+	// Use default resolvers if not available (fallback)
+	resolvers := []string{"1.1.1.1:53", "8.8.8.8:53"}
+
+	attempt := 1
+	for {
+		// Try each configured resolver
+		for _, resolverAddr := range resolvers {
+			resolver := &net.Resolver{
+				PreferGo: true,
+				Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+					d := net.Dialer{
+						Timeout: time.Second * 10,
+					}
+					return d.DialContext(ctx, network, resolverAddr)
+				},
 			}
-			return d.DialContext(ctx, network, "1.1.1.1:53")
-		},
-	}
 
-	maxAttempts := 12 // 2 minutes total (12 * 10 seconds)
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		ips, err := resolver.LookupIPAddr(ctx, recordName)
-		cancel()
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ips, err := resolver.LookupIPAddr(ctx, recordName)
+			cancel()
 
-		if err == nil {
-			for _, ip := range ips {
-				if ip.IP.String() == expectedIP {
-					r.logger.Info("DNS propagation confirmed",
-						zap.String("record", recordName),
-						zap.String("ip", expectedIP),
-						zap.Int("attempt", attempt))
-					return nil
+			if err == nil {
+				for _, ip := range ips {
+					if ip.IP.String() == expectedIP {
+						r.logger.Info("DNS propagation confirmed",
+							zap.String("record", recordName),
+							zap.String("ip", expectedIP),
+							zap.String("resolver", resolverAddr),
+							zap.Int("attempt", attempt))
+						return nil
+					}
 				}
 			}
 		}
 
-		r.logger.Debug("Waiting for DNS propagation",
+		r.logger.Info("DNS propagation not yet complete, retrying",
 			zap.String("record", recordName),
 			zap.String("expected_ip", expectedIP),
-			zap.Int("attempt", attempt),
-			zap.Int("max_attempts", maxAttempts))
+			zap.Int("attempt", attempt))
 
-		if attempt < maxAttempts {
-			time.Sleep(10 * time.Second)
-		}
+		attempt++
+		time.Sleep(15 * time.Second) // Wait 15 seconds between attempts
 	}
-
-	return fmt.Errorf("DNS record did not propagate after %d attempts", maxAttempts)
 }
 
 // cleanupFailedSSLRecord removes DNS records when SSL setup fails
@@ -851,7 +855,15 @@ func runDNSScale(config *Config) error {
 
 		// Initialize SSL manager
 		var err error
-		sslManager, err = ssl.NewManager(logger, sslDNSProvider, config.SSL.Email, false) // Use production Let's Encrypt
+		sslManager, err = ssl.NewManager(
+			logger,
+			sslDNSProvider,
+			config.SSL.Email,
+			false, // Use production Let's Encrypt
+			config.SSL.DNSResolvers,
+			config.SSL.PropagationTimeout,
+			config.SSL.DisablePropagationCheck,
+		)
 		if err != nil {
 			logger.Fatal("Failed to initialize SSL manager", zap.Error(err))
 		}

@@ -68,6 +68,9 @@ func init() {
 	// SSL flags
 	rootCmd.PersistentFlags().Bool("ssl-enabled", false, "Enable SSL certificate management")
 	rootCmd.PersistentFlags().String("ssl-email", "", "Email for ACME registration")
+	rootCmd.PersistentFlags().StringSlice("ssl-dns-resolvers", []string{"1.1.1.1:53", "8.8.8.8:53"}, "DNS resolvers for ACME challenges")
+	rootCmd.PersistentFlags().Int("ssl-propagation-timeout", 120, "DNS propagation timeout in seconds")
+	rootCmd.PersistentFlags().Bool("ssl-disable-propagation-check", false, "Disable DNS propagation requirements")
 
 	// Bind flags to viper
 	viper.BindPFlag("tailscale.api_key", rootCmd.PersistentFlags().Lookup("tailscale-api-key"))
@@ -85,6 +88,9 @@ func init() {
 	viper.BindPFlag("logging.format", rootCmd.PersistentFlags().Lookup("log-format"))
 	viper.BindPFlag("ssl.enabled", rootCmd.PersistentFlags().Lookup("ssl-enabled"))
 	viper.BindPFlag("ssl.email", rootCmd.PersistentFlags().Lookup("ssl-email"))
+	viper.BindPFlag("ssl.dns_resolvers", rootCmd.PersistentFlags().Lookup("ssl-dns-resolvers"))
+	viper.BindPFlag("ssl.propagation_timeout", rootCmd.PersistentFlags().Lookup("ssl-propagation-timeout"))
+	viper.BindPFlag("ssl.disable_propagation_check", rootCmd.PersistentFlags().Lookup("ssl-disable-propagation-check"))
 
 	// Bind environment variables
 	viper.BindEnv("tailscale.api_key", "TAILSCALE_API_KEY")
@@ -96,6 +102,9 @@ func init() {
 	viper.BindEnv("dns.route53.region", "AWS_REGION")
 	viper.BindEnv("ssl.enabled", "SSL_ENABLED")
 	viper.BindEnv("ssl.email", "SSL_EMAIL")
+	viper.BindEnv("ssl.dns_resolvers", "SSL_DNS_RESOLVERS")
+	viper.BindEnv("ssl.propagation_timeout", "SSL_PROPAGATION_TIMEOUT")
+	viper.BindEnv("ssl.disable_propagation_check", "SSL_DISABLE_PROPAGATION_CHECK")
 }
 
 // initConfig reads in config file and ENV variables.

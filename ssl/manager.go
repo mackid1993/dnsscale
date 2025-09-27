@@ -16,18 +16,22 @@ import (
 	"time"
 
 	"github.com/go-acme/lego/v4/certificate"
+	"github.com/go-acme/lego/v4/challenge/dns01"
 	"github.com/go-acme/lego/v4/lego"
 	"github.com/go-acme/lego/v4/registration"
 	"go.uber.org/zap"
 )
 
 type Manager struct {
-	logger        *zap.Logger
-	certDir       string
-	dnsProvider   DNS01Provider
-	acmeClient    *lego.Client
-	email         string
-	staging       bool
+	logger                  *zap.Logger
+	certDir                 string
+	dnsProvider             DNS01Provider
+	acmeClient              *lego.Client
+	email                   string
+	staging                 bool
+	dnsResolvers            []string
+	propagationTimeout      int
+	disablePropagationCheck bool
 }
 
 type DNS01Provider interface {
@@ -43,7 +47,7 @@ type Certificate struct {
 	Expires     time.Time
 }
 
-func NewManager(logger *zap.Logger, dnsProvider DNS01Provider, email string, staging bool) (*Manager, error) {
+func NewManager(logger *zap.Logger, dnsProvider DNS01Provider, email string, staging bool, dnsResolvers []string, propagationTimeout int, disablePropagationCheck bool) (*Manager, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get home directory: %w", err)
@@ -58,12 +62,23 @@ func NewManager(logger *zap.Logger, dnsProvider DNS01Provider, email string, sta
 		email = "dnsscale@localhost"
 	}
 
+	// Set defaults for DNS resolver configuration
+	if len(dnsResolvers) == 0 {
+		dnsResolvers = []string{"1.1.1.1:53", "8.8.8.8:53"}
+	}
+	if propagationTimeout <= 0 {
+		propagationTimeout = 120
+	}
+
 	manager := &Manager{
-		logger:      logger,
-		certDir:     certDir,
-		dnsProvider: dnsProvider,
-		email:       email,
-		staging:     staging,
+		logger:                  logger,
+		certDir:                 certDir,
+		dnsProvider:             dnsProvider,
+		email:                   email,
+		staging:                 staging,
+		dnsResolvers:            dnsResolvers,
+		propagationTimeout:      propagationTimeout,
+		disablePropagationCheck: disablePropagationCheck,
 	}
 
 	if err := manager.initACMEClient(); err != nil {
@@ -90,7 +105,8 @@ func (m *Manager) initACMEClient() error {
 		config.CADirURL = lego.LEDirectoryProduction
 	}
 
-	// Configure HTTP client to use Cloudflare DNS resolver (1.1.1.1)
+	// Configure HTTP client to use configured DNS resolvers
+	primaryResolver := m.dnsResolvers[0] // Use first resolver for HTTP client
 	config.HTTPClient = &http.Client{
 		Transport: &http.Transport{
 			DialContext: (&net.Dialer{
@@ -102,7 +118,7 @@ func (m *Manager) initACMEClient() error {
 						d := net.Dialer{
 							Timeout: time.Second * 10,
 						}
-						return d.DialContext(ctx, network, "1.1.1.1:53")
+						return d.DialContext(ctx, network, primaryResolver)
 					},
 				},
 			}).DialContext,
@@ -116,7 +132,43 @@ func (m *Manager) initACMEClient() error {
 		return fmt.Errorf("failed to create ACME client: %w", err)
 	}
 
-	err = client.Challenge.SetDNS01Provider(m.dnsProvider)
+	// Configure DNS-01 challenge options
+	var dns01Options []dns01.ChallengeOption
+
+	// Use configured DNS resolvers for challenge verification
+	dns01Options = append(dns01Options, dns01.AddRecursiveNameservers(m.dnsResolvers))
+
+	// Configure propagation settings
+	if m.disablePropagationCheck {
+		dns01Options = append(dns01Options, dns01.DisableCompletePropagationRequirement())
+	}
+
+	// Set custom propagation timeout
+	dns01Options = append(dns01Options, dns01.AddPreCheck(func(domain, fqdn, value string, check dns01.PreCheckFunc) (bool, error) {
+		// Keep trying until propagation succeeds or timeout
+		timeout := time.Duration(m.propagationTimeout) * time.Second
+		deadline := time.Now().Add(timeout)
+
+		for time.Now().Before(deadline) {
+			if found, err := check(fqdn, value); found && err == nil {
+				m.logger.Info("DNS propagation verified",
+					zap.String("domain", domain),
+					zap.String("fqdn", fqdn))
+				return true, nil
+			}
+
+			m.logger.Debug("Waiting for DNS propagation",
+				zap.String("domain", domain),
+				zap.String("fqdn", fqdn),
+				zap.Duration("remaining", time.Until(deadline)))
+
+			time.Sleep(10 * time.Second)
+		}
+
+		return false, fmt.Errorf("DNS propagation timeout after %d seconds", m.propagationTimeout)
+	}))
+
+	err = client.Challenge.SetDNS01Provider(m.dnsProvider, dns01Options...)
 	if err != nil {
 		return fmt.Errorf("failed to set DNS01 provider: %w", err)
 	}
