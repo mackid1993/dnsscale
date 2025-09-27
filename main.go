@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jaxxstorm/dnsscale/providers"
+	"github.com/jaxxstorm/dnsscale/ssl"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"k8s.io/client-go/util/workqueue"
@@ -184,9 +185,12 @@ type DNSReconciler struct {
 	pollInterval time.Duration
 	annotations  map[string]string // For filtering based on tags
 	logger       *zap.Logger
+	sslEnabled   bool
+	sslManager   *ssl.Manager
+	proxyManager *ssl.ProxyManager
 }
 
-func NewDNSReconciler(ts *TailscaleClient, dns providers.DNSProvider, domain string, pollInterval time.Duration, logger *zap.Logger) *DNSReconciler {
+func NewDNSReconciler(ts *TailscaleClient, dns providers.DNSProvider, domain string, pollInterval time.Duration, logger *zap.Logger, sslEnabled bool, sslManager *ssl.Manager, proxyManager *ssl.ProxyManager) *DNSReconciler {
 	return &DNSReconciler{
 		tailscale:    ts,
 		dnsProvider:  dns,
@@ -196,20 +200,34 @@ func NewDNSReconciler(ts *TailscaleClient, dns providers.DNSProvider, domain str
 		pollInterval: pollInterval,
 		annotations:  make(map[string]string),
 		logger:       logger,
+		sslEnabled:   sslEnabled,
+		sslManager:   sslManager,
+		proxyManager: proxyManager,
 	}
 }
 
 // Run starts the reconciliation loop
 func (r *DNSReconciler) Run(ctx context.Context, workers int) error {
 	defer r.queue.ShutDown()
+	defer func() {
+		if r.proxyManager != nil {
+			r.proxyManager.StopAll()
+		}
+	}()
 
 	r.logger.Info("Starting DNS reconciler",
 		zap.Int("workers", workers),
 		zap.String("domain", r.domain),
-		zap.Duration("poll_interval", r.pollInterval))
+		zap.Duration("poll_interval", r.pollInterval),
+		zap.Bool("ssl_enabled", r.sslEnabled))
 
 	// Start the Tailscale watcher
 	go r.watchTailscale(ctx)
+
+	// Start certificate renewal if SSL is enabled
+	if r.sslEnabled && r.sslManager != nil {
+		go r.certificateRenewalLoop(ctx)
+	}
 
 	// Start workers
 	var wg sync.WaitGroup
@@ -336,28 +354,36 @@ func (r *DNSReconciler) reconcile(ctx context.Context, key string) error {
 	// Create DNS records for the node
 	recordName := fmt.Sprintf("%s.%s", node.Name, r.domain)
 
-	for _, addr := range node.Addresses {
-		recordType := "A"
-		if strings.Contains(addr, ":") {
-			recordType = "AAAA"
+	if r.sslEnabled && r.sslManager != nil && r.proxyManager != nil {
+		// SSL mode: Set up certificate and proxy
+		if err := r.setupSSLForNode(ctx, node, recordName); err != nil {
+			return fmt.Errorf("failed to setup SSL for node %s: %w", node.Name, err)
 		}
+	} else {
+		// Normal mode: Create direct DNS records
+		for _, addr := range node.Addresses {
+			recordType := "A"
+			if strings.Contains(addr, ":") {
+				recordType = "AAAA"
+			}
 
-		record := providers.DNSRecord{
-			Name:  recordName,
-			Type:  recordType,
-			Value: addr,
-			TTL:   300,
+			record := providers.DNSRecord{
+				Name:  recordName,
+				Type:  recordType,
+				Value: addr,
+				TTL:   300,
+			}
+
+			if err := r.dnsProvider.UpdateRecord(ctx, r.domain, record); err != nil {
+				return fmt.Errorf("failed to update DNS record: %w", err)
+			}
+
+			r.logger.Info("Updated DNS record",
+				zap.String("record_type", recordType),
+				zap.String("record_name", record.Name),
+				zap.String("record_value", addr),
+				zap.String("node_name", node.Name))
 		}
-
-		if err := r.dnsProvider.UpdateRecord(ctx, r.domain, record); err != nil {
-			return fmt.Errorf("failed to update DNS record: %w", err)
-		}
-
-		r.logger.Info("Updated DNS record",
-			zap.String("record_type", recordType),
-			zap.String("record_name", record.Name),
-			zap.String("record_value", addr),
-			zap.String("node_name", node.Name))
 	}
 
 	// Create TXT ownership record to indicate this record is managed by dnsscale
@@ -434,6 +460,122 @@ func (r *DNSReconciler) shouldManageNode(node TailscaleNode) bool {
 		return false
 	}
 	return true
+}
+
+// setupSSLForNode handles SSL certificate and proxy setup for a node
+func (r *DNSReconciler) setupSSLForNode(ctx context.Context, node TailscaleNode, recordName string) error {
+	// Try to load existing certificate first
+	cert, err := r.sslManager.LoadCertificate(recordName)
+	if err != nil {
+		// Certificate doesn't exist, obtain a new one
+		cert, err = r.sslManager.ObtainCertificate(ctx, recordName)
+		if err != nil {
+			return fmt.Errorf("failed to obtain certificate for %s: %w", recordName, err)
+		}
+	}
+
+	// Find the first IPv4 address for the proxy target
+	var targetAddr string
+	for _, addr := range node.Addresses {
+		if !strings.Contains(addr, ":") { // IPv4
+			targetAddr = fmt.Sprintf("%s:80", addr) // Default to port 80
+			break
+		}
+	}
+
+	if targetAddr == "" {
+		return fmt.Errorf("no IPv4 address found for node %s", node.Name)
+	}
+
+	// Start SSL proxy
+	if err := r.proxyManager.StartProxy(recordName, targetAddr); err != nil {
+		return fmt.Errorf("failed to start proxy: %w", err)
+	}
+
+	// Create DNS record pointing to localhost (where proxy runs)
+	record := providers.DNSRecord{
+		Name:  recordName,
+		Type:  "A",
+		Value: "127.0.0.1", // Proxy runs locally
+		TTL:   300,
+	}
+
+	if err := r.dnsProvider.UpdateRecord(ctx, r.domain, record); err != nil {
+		return fmt.Errorf("failed to update DNS record: %w", err)
+	}
+
+	r.logger.Info("Setup SSL for node",
+		zap.String("node_name", node.Name),
+		zap.String("record_name", recordName),
+		zap.String("target", targetAddr),
+		zap.Time("cert_expires", cert.Expires))
+
+	return nil
+}
+
+// certificateRenewalLoop handles automatic certificate renewal
+func (r *DNSReconciler) certificateRenewalLoop(ctx context.Context) {
+	ticker := time.NewTicker(24 * time.Hour) // Check daily
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			r.checkAndRenewCertificates(ctx)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// checkAndRenewCertificates checks all certificates and renews if needed
+func (r *DNSReconciler) checkAndRenewCertificates(ctx context.Context) {
+	r.cacheMutex.RLock()
+	nodes := make([]TailscaleNode, 0, len(r.nodeCache))
+	for _, node := range r.nodeCache {
+		nodes = append(nodes, node)
+	}
+	r.cacheMutex.RUnlock()
+
+	for _, node := range nodes {
+		if !r.shouldManageNode(node) {
+			continue
+		}
+
+		recordName := fmt.Sprintf("%s.%s", node.Name, r.domain)
+		cert, err := r.sslManager.LoadCertificate(recordName)
+		if err != nil {
+			r.logger.Debug("Certificate not found for renewal check",
+				zap.String("domain", recordName),
+				zap.Error(err))
+			continue
+		}
+
+		if r.sslManager.NeedsRenewal(cert) {
+			r.logger.Info("Renewing certificate",
+				zap.String("domain", recordName),
+				zap.Time("expires", cert.Expires))
+
+			newCert, err := r.sslManager.RenewCertificate(ctx, recordName)
+			if err != nil {
+				r.logger.Error("Failed to renew certificate",
+					zap.String("domain", recordName),
+					zap.Error(err))
+				continue
+			}
+
+			// Reload certificate in proxy
+			if err := r.proxyManager.ReloadCertificate(recordName); err != nil {
+				r.logger.Error("Failed to reload certificate in proxy",
+					zap.String("domain", recordName),
+					zap.Error(err))
+			}
+
+			r.logger.Info("Successfully renewed certificate",
+				zap.String("domain", recordName),
+				zap.Time("new_expires", newCert.Expires))
+		}
+	}
 }
 
 // Helper function to compare nodes
@@ -522,8 +664,44 @@ func runDNSScale(config *Config) error {
 		logger.Fatal("Failed to initialize DNS provider", zap.Error(err))
 	}
 
+	// Initialize SSL components if enabled
+	var sslManager *ssl.Manager
+	var proxyManager *ssl.ProxyManager
+
+	if config.SSL.Enabled {
+		logger.Info("SSL enabled, initializing certificate manager")
+
+		// Create DNS provider for ACME challenges
+		var cfProvider interface{}
+		if config.DNS.Provider == "cloudflare" {
+			cfProvider = dnsProvider
+		} else {
+			logger.Fatal("SSL is only supported with Cloudflare DNS provider")
+		}
+
+		// Create SSL DNS provider for ACME challenges
+		sslDNSProvider := ssl.NewCloudflareDNSProvider(
+			config.DNS.Cloudflare.APIToken,
+			config.DNS.ZoneID,
+			logger,
+			cfProvider,
+		)
+
+		// Initialize SSL manager
+		var err error
+		sslManager, err = ssl.NewManager(logger, sslDNSProvider, "", false) // Use production Let's Encrypt
+		if err != nil {
+			logger.Fatal("Failed to initialize SSL manager", zap.Error(err))
+		}
+
+		// Initialize proxy manager
+		proxyManager = ssl.NewProxyManager(logger, sslManager, ":443")
+
+		logger.Info("SSL components initialized successfully")
+	}
+
 	// Create and run reconciler
-	reconciler := NewDNSReconciler(tsClient, dnsProvider, config.DNS.Domain, config.App.PollInterval, logger)
+	reconciler := NewDNSReconciler(tsClient, dnsProvider, config.DNS.Domain, config.App.PollInterval, logger, config.SSL.Enabled, sslManager, proxyManager)
 
 	// Set tag filters if specified
 	for _, tag := range config.App.RequiredTags {

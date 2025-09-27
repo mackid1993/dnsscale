@@ -6,6 +6,7 @@ DNSScale is a tool that automatically manages DNS records for your Tailscale net
 
 - **Automatic DNS Management**: Creates and updates DNS records for Tailscale devices
 - **Multiple DNS Providers**: Supports AWS Route53 and Cloudflare
+- **Zero-Maintenance SSL**: Automatic HTTPS certificates with Let's Encrypt (Cloudflare only)
 - **Real-time Monitoring**: Polls Tailscale API for device changes and updates DNS accordingly
 - **Tag-based Filtering**: Optionally manage only devices with specific tags
 - **Ownership Tracking**: Creates TXT records to track which DNS records are managed by DNSScale
@@ -18,6 +19,7 @@ DNSScale is a tool that automatically manages DNS records for your Tailscale net
 - Uses Cloudflare API v4
 - Requires API token with Zone:Read and DNS:Edit permissions
 - Automatically disables proxy for Tailscale IP addresses
+- **SSL Support**: When `ssl.enabled: true`, automatically provisions Let's Encrypt certificates via DNS-01 challenges
 
 ### AWS Route53
 - Uses AWS SDK v2
@@ -54,6 +56,9 @@ dns:
 
   cloudflare:
     api_token: "your-cloudflare-api-token"
+
+ssl:
+  enabled: true  # Automatic HTTPS for all devices
 
 app:
   workers: 2
@@ -138,6 +143,10 @@ export CLOUDFLARE_API_TOKEN="your-cloudflare-api-token"
 - `dns.route53.profile`: AWS profile to use (optional)
 - `dns.route53.region`: AWS region (optional)
 
+### SSL Configuration
+
+- `ssl.enabled`: Enable automatic SSL certificate provisioning (default: false, Cloudflare only)
+
 ### Application Settings
 
 - `app.workers`: Number of worker goroutines (default: 2)
@@ -156,8 +165,13 @@ export CLOUDFLARE_API_TOKEN="your-cloudflare-api-token"
    - A record (IPv4) pointing to the device's Tailscale IP
    - AAAA record (IPv6) pointing to the device's Tailscale IPv6 address
    - TXT record for ownership tracking
-3. **Continuous Monitoring**: Regularly checks for device changes and updates DNS accordingly
-4. **Cleanup**: When devices are removed from Tailscale, their DNS records are automatically deleted
+3. **SSL Certificate Management** (when enabled):
+   - Automatically obtains Let's Encrypt certificates using DNS-01 challenges
+   - Creates local SSL proxy on port 443 for each device
+   - DNS records point to proxy, which forwards to actual device
+   - Certificates auto-renew 30 days before expiry
+4. **Continuous Monitoring**: Regularly checks for device changes and updates DNS accordingly
+5. **Cleanup**: When devices are removed from Tailscale, their DNS records and certificates are automatically deleted
 
 ## DNS Record Format
 

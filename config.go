@@ -13,6 +13,9 @@ type Config struct {
 	// DNS provider configuration
 	DNS DNSConfig `mapstructure:"dns" yaml:"dns"`
 
+	// SSL configuration
+	SSL SSLConfig `mapstructure:"ssl" yaml:"ssl"`
+
 	// Application settings
 	App AppConfig `mapstructure:"app" yaml:"app"`
 
@@ -46,6 +49,11 @@ type Route53Config struct {
 // CloudflareConfig holds Cloudflare specific configuration
 type CloudflareConfig struct {
 	APIToken string `mapstructure:"api_token" yaml:"api_token"`
+}
+
+// SSLConfig holds SSL certificate configuration
+type SSLConfig struct {
+	Enabled bool `mapstructure:"enabled" yaml:"enabled"`
 }
 
 // AppConfig holds general application configuration
