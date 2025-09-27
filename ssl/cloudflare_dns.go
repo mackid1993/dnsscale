@@ -66,14 +66,23 @@ func (c *CloudflareDNSProvider) Present(domain, token, keyAuth string) error {
 		TTL:   120,
 	}
 
-	c.logger.Debug("Creating ACME challenge TXT record",
+	c.logger.Info("Creating ACME challenge TXT record",
 		zap.String("domain", domain),
 		zap.String("record_name", recordName),
+		zap.String("challenge_value", keyAuth),
 		zap.String("token", token))
 
 	if err := c.cfClient.CreateRecord(ctx, extractZone(domain), record.toProvidersRecord()); err != nil {
+		c.logger.Error("Failed to create ACME challenge TXT record",
+			zap.String("domain", domain),
+			zap.String("record_name", recordName),
+			zap.Error(err))
 		return fmt.Errorf("failed to create DNS challenge record: %w", err)
 	}
+
+	c.logger.Info("Successfully created ACME challenge TXT record",
+		zap.String("domain", domain),
+		zap.String("record_name", recordName))
 
 	time.Sleep(10 * time.Second)
 	return nil

@@ -90,10 +90,6 @@ func NewManager(logger *zap.Logger, dnsProvider DNS01Provider, email string, sta
 }
 
 func (m *Manager) initACMEClient() error {
-	// Set environment variables for lego to use our DNS resolvers
-	os.Setenv("LEGO_DNS_RESOLVERS", strings.Join(m.dnsResolvers, ","))
-	os.Setenv("LEGO_DISABLE_CNAME_SUPPORT", "true")
-
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return fmt.Errorf("failed to generate private key: %w", err)
@@ -110,25 +106,8 @@ func (m *Manager) initACMEClient() error {
 		config.CADirURL = lego.LEDirectoryProduction
 	}
 
-	// Configure HTTP client to use configured DNS resolvers
-	primaryResolver := m.dnsResolvers[0] // Use first resolver for HTTP client
+	// Use default HTTP client for ACME server communication
 	config.HTTPClient = &http.Client{
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-				Resolver: &net.Resolver{
-					PreferGo: true,
-					Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-						d := net.Dialer{
-							Timeout: time.Second * 10,
-						}
-						return d.DialContext(ctx, network, primaryResolver)
-					},
-				},
-			}).DialContext,
-			TLSHandshakeTimeout: 10 * time.Second,
-		},
 		Timeout: 30 * time.Second,
 	}
 
@@ -169,17 +148,27 @@ func (m *Manager) initACMEClient() error {
 }
 
 func (m *Manager) ObtainCertificate(ctx context.Context, domain string) (*Certificate, error) {
-	m.logger.Debug("Obtaining certificate", zap.String("domain", domain))
+	m.logger.Info("Starting certificate obtainment process",
+		zap.String("domain", domain),
+		zap.Strings("dns_resolvers", m.dnsResolvers),
+		zap.Int("propagation_timeout", m.propagationTimeout),
+		zap.Bool("disable_propagation_check", m.disablePropagationCheck))
 
 	request := certificate.ObtainRequest{
 		Domains: []string{domain},
 		Bundle:  true,
 	}
 
+	m.logger.Info("Submitting certificate request to ACME server", zap.String("domain", domain))
 	certificates, err := m.acmeClient.Certificate.Obtain(request)
 	if err != nil {
+		m.logger.Error("ACME certificate obtainment failed",
+			zap.String("domain", domain),
+			zap.Error(err))
 		return nil, fmt.Errorf("failed to obtain certificate for %s: %w", domain, err)
 	}
+
+	m.logger.Info("ACME certificate obtained successfully", zap.String("domain", domain))
 
 	cert, err := m.saveCertificate(domain, certificates)
 	if err != nil {
