@@ -851,16 +851,32 @@ func (r *DNSReconciler) processSSLCertificate(ctx context.Context, domain string
 	}
 
 	// Try to load existing certificate first
-	_, err := r.sslManager.LoadCertificate(domain)
+	cert, err := r.sslManager.LoadCertificate(domain)
 	if err != nil {
 		// Certificate doesn't exist, obtain a new one
 		r.logger.Info("Obtaining new SSL certificate", zap.String("domain", domain))
-		_, err = r.sslManager.ObtainCertificate(ctx, domain)
+		cert, err = r.sslManager.ObtainCertificate(ctx, domain)
 		if err != nil {
 			// Don't clean up - just return error for retry
 			return fmt.Errorf("failed to obtain certificate for %s: %w", domain, err)
 		}
 		r.logger.Info("Successfully obtained SSL certificate", zap.String("domain", domain))
+	} else if r.sslManager.NeedsRenewal(cert) {
+		// Certificate exists but needs renewal
+		r.logger.Info("Certificate needs renewal",
+			zap.String("domain", domain),
+			zap.Time("expires", cert.Expires))
+		cert, err = r.sslManager.RenewCertificate(ctx, domain)
+		if err != nil {
+			// Don't clean up - just return error for retry
+			return fmt.Errorf("failed to renew certificate for %s: %w", domain, err)
+		}
+		r.logger.Info("Successfully renewed SSL certificate", zap.String("domain", domain))
+	} else {
+		// Certificate exists and is valid
+		r.logger.Info("Using existing valid SSL certificate",
+			zap.String("domain", domain),
+			zap.Time("expires", cert.Expires))
 	}
 
 	// Start SSL proxy pointing to the node
