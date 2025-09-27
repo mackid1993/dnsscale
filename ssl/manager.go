@@ -9,6 +9,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -86,6 +88,27 @@ func (m *Manager) initACMEClient() error {
 		config.CADirURL = lego.LEDirectoryStaging
 	} else {
 		config.CADirURL = lego.LEDirectoryProduction
+	}
+
+	// Configure HTTP client to use Cloudflare DNS resolver (1.1.1.1)
+	config.HTTPClient = &http.Client{
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+				Resolver: &net.Resolver{
+					PreferGo: true,
+					Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+						d := net.Dialer{
+							Timeout: time.Second * 10,
+						}
+						return d.DialContext(ctx, network, "1.1.1.1:53")
+					},
+				},
+			}).DialContext,
+			TLSHandshakeTimeout: 10 * time.Second,
+		},
+		Timeout: 30 * time.Second,
 	}
 
 	client, err := lego.NewClient(config)
