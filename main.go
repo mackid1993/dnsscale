@@ -464,6 +464,39 @@ func (r *DNSReconciler) shouldManageNode(node TailscaleNode) bool {
 
 // setupSSLForNode handles SSL certificate and proxy setup for a node
 func (r *DNSReconciler) setupSSLForNode(ctx context.Context, node TailscaleNode, recordName string) error {
+	// Find the first IPv4 address for the node
+	var nodeIPv4 string
+	for _, addr := range node.Addresses {
+		if !strings.Contains(addr, ":") { // IPv4
+			nodeIPv4 = addr
+			break
+		}
+	}
+
+	if nodeIPv4 == "" {
+		return fmt.Errorf("no IPv4 address found for node %s", node.Name)
+	}
+
+	// First, create DNS record pointing to the actual node IP
+	// This ensures the domain exists before we try to get a certificate
+	initialRecord := providers.DNSRecord{
+		Name:  recordName,
+		Type:  "A",
+		Value: nodeIPv4,
+		TTL:   300,
+	}
+
+	if err := r.dnsProvider.UpdateRecord(ctx, r.domain, initialRecord); err != nil {
+		return fmt.Errorf("failed to create initial DNS record: %w", err)
+	}
+
+	r.logger.Info("Created initial DNS record for SSL",
+		zap.String("record", recordName),
+		zap.String("ip", nodeIPv4))
+
+	// Wait a bit for DNS propagation
+	time.Sleep(30 * time.Second)
+
 	// Try to load existing certificate first
 	cert, err := r.sslManager.LoadCertificate(recordName)
 	if err != nil {
@@ -474,34 +507,22 @@ func (r *DNSReconciler) setupSSLForNode(ctx context.Context, node TailscaleNode,
 		}
 	}
 
-	// Find the first IPv4 address for the proxy target
-	var targetAddr string
-	for _, addr := range node.Addresses {
-		if !strings.Contains(addr, ":") { // IPv4
-			targetAddr = fmt.Sprintf("%s:80", addr) // Default to port 80
-			break
-		}
-	}
-
-	if targetAddr == "" {
-		return fmt.Errorf("no IPv4 address found for node %s", node.Name)
-	}
-
-	// Start SSL proxy
+	// Start SSL proxy pointing to the node
+	targetAddr := fmt.Sprintf("%s:80", nodeIPv4) // Default to port 80
 	if err := r.proxyManager.StartProxy(recordName, targetAddr); err != nil {
 		return fmt.Errorf("failed to start proxy: %w", err)
 	}
 
-	// Create DNS record pointing to localhost (where proxy runs)
-	record := providers.DNSRecord{
+	// Update DNS record to point to localhost (where proxy runs)
+	proxyRecord := providers.DNSRecord{
 		Name:  recordName,
 		Type:  "A",
 		Value: "127.0.0.1", // Proxy runs locally
 		TTL:   300,
 	}
 
-	if err := r.dnsProvider.UpdateRecord(ctx, r.domain, record); err != nil {
-		return fmt.Errorf("failed to update DNS record: %w", err)
+	if err := r.dnsProvider.UpdateRecord(ctx, r.domain, proxyRecord); err != nil {
+		return fmt.Errorf("failed to update DNS record to proxy: %w", err)
 	}
 
 	r.logger.Info("Setup SSL for node",
