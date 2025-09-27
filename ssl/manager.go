@@ -148,30 +148,10 @@ func (m *Manager) initACMEClient() error {
 		dns01Options = append(dns01Options, dns01.DisableCompletePropagationRequirement())
 	}
 
-	// Set custom propagation timeout
-	dns01Options = append(dns01Options, dns01.AddPreCheck(func(domain, fqdn, value string, check dns01.PreCheckFunc) (bool, error) {
-		// Keep trying until propagation succeeds or timeout
-		timeout := time.Duration(m.propagationTimeout) * time.Second
-		deadline := time.Now().Add(timeout)
-
-		for time.Now().Before(deadline) {
-			if found, err := check(fqdn, value); found && err == nil {
-				m.logger.Info("DNS propagation verified",
-					zap.String("domain", domain),
-					zap.String("fqdn", fqdn))
-				return true, nil
-			}
-
-			m.logger.Debug("Waiting for DNS propagation",
-				zap.String("domain", domain),
-				zap.String("fqdn", fqdn),
-				zap.Duration("remaining", time.Until(deadline)))
-
-			time.Sleep(10 * time.Second)
-		}
-
-		return false, fmt.Errorf("DNS propagation timeout after %d seconds", m.propagationTimeout)
-	}))
+	// Set DNS propagation timeout
+	if m.propagationTimeout > 0 {
+		dns01Options = append(dns01Options, dns01.AddDNSTimeout(time.Duration(m.propagationTimeout)*time.Second))
+	}
 
 	err = client.Challenge.SetDNS01Provider(m.dnsProvider, dns01Options...)
 	if err != nil {
