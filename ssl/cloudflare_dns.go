@@ -63,7 +63,7 @@ func (c *CloudflareDNSProvider) Present(domain, token, keyAuth string) error {
 		Name:  recordName,
 		Type:  "TXT",
 		Value: keyAuth, // Don't add extra quotes - the provider handles quoting
-		TTL:   120,
+		TTL:   60, // Minimum TTL allowed by Cloudflare for ACME challenges
 	}
 
 	c.logger.Info("Creating ACME challenge TXT record",
