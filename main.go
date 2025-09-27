@@ -189,8 +189,9 @@ type DNSReconciler struct {
 	sslEnabled   bool
 	sslManager   *ssl.Manager
 	proxyManager *ssl.ProxyManager
-	sslFailures  map[string]time.Time // Track SSL failures for retry logic
-	failureMutex sync.RWMutex         // Protect sslFailures map
+	sslQueue     workqueue.RateLimitingInterface // Separate queue for SSL certificate processing
+	sslFailures  map[string]time.Time           // Track SSL failures for retry logic
+	failureMutex sync.RWMutex                   // Protect sslFailures map
 }
 
 func NewDNSReconciler(ts *TailscaleClient, dns providers.DNSProvider, domain string, pollInterval time.Duration, logger *zap.Logger, sslEnabled bool, sslManager *ssl.Manager, proxyManager *ssl.ProxyManager) *DNSReconciler {
@@ -206,6 +207,7 @@ func NewDNSReconciler(ts *TailscaleClient, dns providers.DNSProvider, domain str
 		sslEnabled:   sslEnabled,
 		sslManager:   sslManager,
 		proxyManager: proxyManager,
+		sslQueue:     workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
 		sslFailures:  make(map[string]time.Time),
 	}
 }
@@ -213,6 +215,7 @@ func NewDNSReconciler(ts *TailscaleClient, dns providers.DNSProvider, domain str
 // Run starts the reconciliation loop
 func (r *DNSReconciler) Run(ctx context.Context, workers int) error {
 	defer r.queue.ShutDown()
+	defer r.sslQueue.ShutDown()
 	defer func() {
 		if r.proxyManager != nil {
 			r.proxyManager.StopAll()
@@ -239,9 +242,22 @@ func (r *DNSReconciler) Run(ctx context.Context, workers int) error {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			r.logger.Debug("Starting worker", zap.Int("worker_id", workerID))
+			r.logger.Debug("Starting DNS worker", zap.Int("worker_id", workerID))
 			r.worker(ctx)
 		}(i)
+	}
+
+	// Start SSL certificate workers (separate from DNS workers)
+	if r.sslEnabled && r.sslManager != nil && r.proxyManager != nil {
+		sslWorkers := 2 // Use fewer SSL workers since they're slower
+		for i := 0; i < sslWorkers; i++ {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
+				r.logger.Debug("Starting SSL worker", zap.Int("worker_id", workerID))
+				r.sslWorker(ctx)
+			}(i)
+		}
 	}
 
 	<-ctx.Done()
@@ -358,47 +374,35 @@ func (r *DNSReconciler) reconcile(ctx context.Context, key string) error {
 	// Create DNS records for the node
 	recordName := fmt.Sprintf("%s.%s", node.Name, r.domain)
 
+	// ALWAYS create DNS A/AAAA records first - SSL is separate
+	for _, addr := range node.Addresses {
+		recordType := "A"
+		if strings.Contains(addr, ":") {
+			recordType = "AAAA"
+		}
+
+		record := providers.DNSRecord{
+			Name:  recordName,
+			Type:  recordType,
+			Value: addr,
+			TTL:   300,
+		}
+
+		if err := r.dnsProvider.UpdateRecord(ctx, r.domain, record); err != nil {
+			return fmt.Errorf("failed to update DNS record: %w", err)
+		}
+
+		r.logger.Info("Updated DNS record",
+			zap.String("record_type", recordType),
+			zap.String("record_name", record.Name),
+			zap.String("record_value", addr),
+			zap.String("node_name", node.Name))
+	}
+
+	// If SSL is enabled, queue this domain for SSL certificate generation
+	// This happens in the background and doesn't block DNS record creation
 	if r.sslEnabled && r.sslManager != nil && r.proxyManager != nil {
-		// Check if we should retry SSL setup for this node
-		if r.shouldRetrySSL(recordName) {
-			// SSL mode: Set up certificate and proxy
-			if err := r.setupSSLForNode(ctx, node, recordName); err != nil {
-				// Record the failure for retry logic
-				r.recordSSLFailure(recordName)
-				return fmt.Errorf("failed to setup SSL for node %s: %w", node.Name, err)
-			}
-			// Success - remove from failures
-			r.clearSSLFailure(recordName)
-		} else {
-			r.logger.Debug("Skipping SSL setup due to recent failure",
-				zap.String("node_name", node.Name),
-				zap.String("record_name", recordName))
-		}
-	} else {
-		// Normal mode: Create direct DNS records
-		for _, addr := range node.Addresses {
-			recordType := "A"
-			if strings.Contains(addr, ":") {
-				recordType = "AAAA"
-			}
-
-			record := providers.DNSRecord{
-				Name:  recordName,
-				Type:  recordType,
-				Value: addr,
-				TTL:   300,
-			}
-
-			if err := r.dnsProvider.UpdateRecord(ctx, r.domain, record); err != nil {
-				return fmt.Errorf("failed to update DNS record: %w", err)
-			}
-
-			r.logger.Info("Updated DNS record",
-				zap.String("record_type", recordType),
-				zap.String("record_name", record.Name),
-				zap.String("record_value", addr),
-				zap.String("node_name", node.Name))
-		}
+		r.queueSSLCertificate(recordName)
 	}
 
 	// Create TXT ownership record to indicate this record is managed by dnsscale
@@ -525,27 +529,6 @@ func (r *DNSReconciler) waitForDNSPropagation(recordName, expectedIP string) err
 	}
 }
 
-// cleanupFailedSSLRecord removes DNS records when SSL setup fails
-func (r *DNSReconciler) cleanupFailedSSLRecord(ctx context.Context, recordName string) error {
-	r.logger.Info("Cleaning up failed SSL DNS record", zap.String("record", recordName))
-
-	// Try to delete the DNS record
-	record := providers.DNSRecord{
-		Name: recordName,
-		Type: "A",
-		// Value doesn't matter for deletion, but some providers might need it
-		Value: "127.0.0.1",
-		TTL:   300,
-	}
-
-	if err := r.dnsProvider.DeleteRecord(ctx, r.domain, record); err != nil {
-		return fmt.Errorf("failed to delete DNS record %s: %w", recordName, err)
-	}
-
-	r.logger.Info("Successfully cleaned up failed SSL DNS record", zap.String("record", recordName))
-	return nil
-}
-
 // shouldRetrySSL checks if enough time has passed since the last SSL failure
 func (r *DNSReconciler) shouldRetrySSL(recordName string) bool {
 	r.failureMutex.RLock()
@@ -579,107 +562,6 @@ func (r *DNSReconciler) clearSSLFailure(recordName string) {
 
 	delete(r.sslFailures, recordName)
 	r.logger.Debug("Cleared SSL failure record", zap.String("record", recordName))
-}
-
-// setupSSLForNode handles SSL certificate and proxy setup for a node
-func (r *DNSReconciler) setupSSLForNode(ctx context.Context, node TailscaleNode, recordName string) error {
-	// Find the first IPv4 address for the node
-	var nodeIPv4 string
-	for _, addr := range node.Addresses {
-		if !strings.Contains(addr, ":") { // IPv4
-			nodeIPv4 = addr
-			break
-		}
-	}
-
-	if nodeIPv4 == "" {
-		return fmt.Errorf("no IPv4 address found for node %s", node.Name)
-	}
-
-	// First, create DNS record pointing to the actual node IP
-	// This ensures the domain exists before we try to get a certificate
-	initialRecord := providers.DNSRecord{
-		Name:  recordName,
-		Type:  "A",
-		Value: nodeIPv4,
-		TTL:   300,
-	}
-
-	if err := r.dnsProvider.UpdateRecord(ctx, r.domain, initialRecord); err != nil {
-		return fmt.Errorf("failed to create initial DNS record: %w", err)
-	}
-
-	r.logger.Info("Created initial DNS record for SSL",
-		zap.String("record", recordName),
-		zap.String("ip", nodeIPv4))
-
-	// Wait for DNS propagation using Cloudflare resolver
-	if err := r.waitForDNSPropagation(recordName, nodeIPv4); err != nil {
-		r.logger.Warn("DNS propagation check failed, proceeding anyway", zap.Error(err))
-		// Still wait a bit as fallback
-		time.Sleep(30 * time.Second)
-	}
-
-	// Try to load existing certificate first
-	cert, err := r.sslManager.LoadCertificate(recordName)
-	if err != nil {
-		// Certificate doesn't exist, obtain a new one
-		r.logger.Info("Obtaining SSL certificate", zap.String("domain", recordName))
-		cert, err = r.sslManager.ObtainCertificate(ctx, recordName)
-		if err != nil {
-			// Certificate generation failed, clean up the DNS record
-			r.logger.Error("Failed to obtain SSL certificate, cleaning up DNS record",
-				zap.String("domain", recordName),
-				zap.Error(err))
-
-			if cleanupErr := r.cleanupFailedSSLRecord(ctx, recordName); cleanupErr != nil {
-				r.logger.Warn("Failed to cleanup DNS record after SSL failure",
-					zap.String("domain", recordName),
-					zap.Error(cleanupErr))
-			}
-
-			return fmt.Errorf("failed to obtain certificate for %s: %w", recordName, err)
-		}
-		r.logger.Info("Successfully obtained SSL certificate", zap.String("domain", recordName))
-	}
-
-	// Start SSL proxy pointing to the node
-	targetAddr := fmt.Sprintf("%s:80", nodeIPv4) // Default to port 80
-	if err := r.proxyManager.StartProxy(recordName, targetAddr); err != nil {
-		r.logger.Error("Failed to start SSL proxy, cleaning up",
-			zap.String("domain", recordName),
-			zap.String("target", targetAddr),
-			zap.Error(err))
-
-		// Clean up the DNS record since proxy failed
-		if cleanupErr := r.cleanupFailedSSLRecord(ctx, recordName); cleanupErr != nil {
-			r.logger.Warn("Failed to cleanup DNS record after proxy failure",
-				zap.String("domain", recordName),
-				zap.Error(cleanupErr))
-		}
-
-		return fmt.Errorf("failed to start proxy for %s: %w", recordName, err)
-	}
-
-	// Update DNS record to point to localhost (where proxy runs)
-	proxyRecord := providers.DNSRecord{
-		Name:  recordName,
-		Type:  "A",
-		Value: "127.0.0.1", // Proxy runs locally
-		TTL:   300,
-	}
-
-	if err := r.dnsProvider.UpdateRecord(ctx, r.domain, proxyRecord); err != nil {
-		return fmt.Errorf("failed to update DNS record to proxy: %w", err)
-	}
-
-	r.logger.Info("Setup SSL for node",
-		zap.String("node_name", node.Name),
-		zap.String("record_name", recordName),
-		zap.String("target", targetAddr),
-		zap.Time("cert_expires", cert.Expires))
-
-	return nil
 }
 
 // certificateRenewalLoop handles automatic certificate renewal
@@ -890,6 +772,106 @@ func runDNSScale(config *Config) error {
 	if err := reconciler.Run(ctx, config.App.Workers); err != nil {
 		logger.Fatal("Reconciler failed", zap.Error(err))
 	}
+
+	return nil
+}
+
+// queueSSLCertificate adds a domain to the SSL certificate processing queue
+func (r *DNSReconciler) queueSSLCertificate(domain string) {
+	if r.shouldRetrySSL(domain) {
+		r.logger.Info("Queuing SSL certificate generation", zap.String("domain", domain))
+		r.sslQueue.Add(domain)
+	} else {
+		r.logger.Debug("Skipping SSL queue due to recent failure", zap.String("domain", domain))
+	}
+}
+
+// sslWorker processes SSL certificate requests from the queue
+func (r *DNSReconciler) sslWorker(ctx context.Context) {
+	for {
+		item, shutdown := r.sslQueue.Get()
+		if shutdown {
+			return
+		}
+
+		domain := item.(string)
+		r.logger.Info("Processing SSL certificate request", zap.String("domain", domain))
+
+		// Keep trying until success - no immediate failure/cleanup
+		err := r.processSSLCertificate(ctx, domain)
+		if err != nil {
+			r.logger.Warn("SSL certificate generation failed, will retry",
+				zap.String("domain", domain),
+				zap.Error(err))
+
+			// Requeue with exponential backoff
+			r.sslQueue.AddRateLimited(item)
+		} else {
+			r.logger.Info("SSL certificate generated successfully", zap.String("domain", domain))
+			r.clearSSLFailure(domain)
+			r.sslQueue.Forget(item)
+		}
+
+		r.sslQueue.Done(item)
+	}
+}
+
+// processSSLCertificate handles the actual SSL certificate generation
+func (r *DNSReconciler) processSSLCertificate(ctx context.Context, domain string) error {
+	// Get the node to find the target IP
+	var targetNode TailscaleNode
+	found := false
+
+	r.cacheMutex.RLock()
+	for _, node := range r.nodeCache {
+		expectedDomain := fmt.Sprintf("%s.%s", node.Name, r.domain)
+		if expectedDomain == domain {
+			targetNode = node
+			found = true
+			break
+		}
+	}
+	r.cacheMutex.RUnlock()
+
+	if !found {
+		return fmt.Errorf("node not found for domain %s", domain)
+	}
+
+	// Find IPv4 address
+	var nodeIPv4 string
+	for _, addr := range targetNode.Addresses {
+		if !strings.Contains(addr, ":") {
+			nodeIPv4 = addr
+			break
+		}
+	}
+
+	if nodeIPv4 == "" {
+		return fmt.Errorf("no IPv4 address found for node %s", targetNode.Name)
+	}
+
+	// Try to load existing certificate first
+	cert, err := r.sslManager.LoadCertificate(domain)
+	if err != nil {
+		// Certificate doesn't exist, obtain a new one
+		r.logger.Info("Obtaining new SSL certificate", zap.String("domain", domain))
+		cert, err = r.sslManager.ObtainCertificate(ctx, domain)
+		if err != nil {
+			// Don't clean up - just return error for retry
+			return fmt.Errorf("failed to obtain certificate for %s: %w", domain, err)
+		}
+		r.logger.Info("Successfully obtained SSL certificate", zap.String("domain", domain))
+	}
+
+	// Start SSL proxy pointing to the node
+	targetAddr := fmt.Sprintf("%s:80", nodeIPv4)
+	if err := r.proxyManager.StartProxy(domain, targetAddr); err != nil {
+		return fmt.Errorf("failed to start proxy for %s: %w", domain, err)
+	}
+
+	r.logger.Info("SSL proxy started successfully",
+		zap.String("domain", domain),
+		zap.String("target", targetAddr))
 
 	return nil
 }
