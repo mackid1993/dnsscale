@@ -65,6 +65,10 @@ func init() {
 	rootCmd.PersistentFlags().String("log-level", "", "Log level (debug, info, warn, error)")
 	rootCmd.PersistentFlags().String("log-format", "", "Log format (json or console)")
 
+	// SSL flags
+	rootCmd.PersistentFlags().Bool("ssl-enabled", false, "Enable SSL certificate management")
+	rootCmd.PersistentFlags().String("ssl-email", "", "Email for ACME registration")
+
 	// Bind flags to viper
 	viper.BindPFlag("tailscale.api_key", rootCmd.PersistentFlags().Lookup("tailscale-api-key"))
 	viper.BindPFlag("tailscale.tailnet", rootCmd.PersistentFlags().Lookup("tailscale-tailnet"))
@@ -79,6 +83,8 @@ func init() {
 	viper.BindPFlag("app.required_tags", rootCmd.PersistentFlags().Lookup("required-tags"))
 	viper.BindPFlag("logging.level", rootCmd.PersistentFlags().Lookup("log-level"))
 	viper.BindPFlag("logging.format", rootCmd.PersistentFlags().Lookup("log-format"))
+	viper.BindPFlag("ssl.enabled", rootCmd.PersistentFlags().Lookup("ssl-enabled"))
+	viper.BindPFlag("ssl.email", rootCmd.PersistentFlags().Lookup("ssl-email"))
 
 	// Bind environment variables
 	viper.BindEnv("tailscale.api_key", "TAILSCALE_API_KEY")
@@ -88,6 +94,8 @@ func init() {
 	viper.BindEnv("dns.cloudflare.api_token", "CLOUDFLARE_API_TOKEN")
 	viper.BindEnv("dns.route53.profile", "AWS_PROFILE")
 	viper.BindEnv("dns.route53.region", "AWS_REGION")
+	viper.BindEnv("ssl.enabled", "SSL_ENABLED")
+	viper.BindEnv("ssl.email", "SSL_EMAIL")
 }
 
 // initConfig reads in config file and ENV variables.
