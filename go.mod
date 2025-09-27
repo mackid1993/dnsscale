@@ -1,4 +1,4 @@
-nomodule github.com/jaxxstorm/dnsscale
+module github.com/jaxxstorm/dnsscale
 
 go 1.24.7
 
