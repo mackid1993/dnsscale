@@ -62,7 +62,7 @@ func (c *CloudflareDNSProvider) Present(domain, token, keyAuth string) error {
 	record := DNSRecord{
 		Name:  recordName,
 		Type:  "TXT",
-		Value: fmt.Sprintf("\"%s\"", keyAuth),
+		Value: keyAuth, // Don't add extra quotes - the provider handles quoting
 		TTL:   120,
 	}
 
@@ -87,7 +87,7 @@ func (c *CloudflareDNSProvider) Present(domain, token, keyAuth string) error {
 	// Wait longer for Cloudflare propagation to authoritative nameservers
 	c.logger.Info("Waiting for TXT record propagation to Cloudflare nameservers",
 		zap.String("record_name", recordName))
-	time.Sleep(60 * time.Second)
+	time.Sleep(120 * time.Second) // Increased to 2 minutes for better propagation
 	return nil
 }
 
