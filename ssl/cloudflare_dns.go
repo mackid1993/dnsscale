@@ -62,7 +62,7 @@ func (c *CloudflareDNSProvider) Present(domain, token, keyAuth string) error {
 	record := DNSRecord{
 		Name:  recordName,
 		Type:  "TXT",
-		Value: keyAuth, // Don't add extra quotes - the provider handles quoting
+		Value: fmt.Sprintf("\"%s\"", keyAuth), // TXT records need to be quoted
 		TTL:   60, // Minimum TTL allowed by Cloudflare for ACME challenges
 	}
 
