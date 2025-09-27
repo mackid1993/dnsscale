@@ -72,22 +72,23 @@ func (c *CloudflareDNSProvider) Present(domain, token, keyAuth string) error {
 		zap.String("challenge_value", keyAuth),
 		zap.String("token", token))
 
-	if err := c.cfClient.CreateRecord(ctx, extractZone(domain), record.toProvidersRecord()); err != nil {
-		c.logger.Error("Failed to create ACME challenge TXT record",
+	if err := c.cfClient.UpdateRecord(ctx, extractZone(domain), record.toProvidersRecord()); err != nil {
+		c.logger.Error("Failed to update ACME challenge TXT record",
 			zap.String("domain", domain),
 			zap.String("record_name", recordName),
 			zap.Error(err))
-		return fmt.Errorf("failed to create DNS challenge record: %w", err)
+		return fmt.Errorf("failed to update DNS challenge record: %w", err)
 	}
 
-	c.logger.Info("Successfully created ACME challenge TXT record",
+	c.logger.Info("Successfully updated ACME challenge TXT record",
 		zap.String("domain", domain),
 		zap.String("record_name", recordName))
 
 	// Wait longer for Cloudflare propagation to authoritative nameservers
+	// Need to wait longer than TTL to ensure cached records expire
 	c.logger.Info("Waiting for TXT record propagation to Cloudflare nameservers",
 		zap.String("record_name", recordName))
-	time.Sleep(120 * time.Second) // Increased to 2 minutes for better propagation
+	time.Sleep(180 * time.Second) // Wait 3 minutes - longer than TTL to ensure cache expiry
 	return nil
 }
 
