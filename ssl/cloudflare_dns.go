@@ -80,10 +80,11 @@ func (c *CloudflareDNSProvider) Present(domain, token, keyAuth string) error {
 }
 
 func (c *CloudflareDNSProvider) CleanUp(domain, token, keyAuth string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	recordName := fmt.Sprintf("_acme-challenge.%s", domain)
+
+	c.logger.Info("Cleaning up ACME challenge TXT record",
+		zap.String("domain", domain),
+		zap.String("record_name", recordName))
 
 	record := DNSRecord{
 		Name:  recordName,
@@ -92,17 +93,44 @@ func (c *CloudflareDNSProvider) CleanUp(domain, token, keyAuth string) error {
 		TTL:   120,
 	}
 
-	c.logger.Debug("Cleaning up ACME challenge TXT record",
-		zap.String("domain", domain),
-		zap.String("record_name", recordName))
+	// Retry cleanup up to 3 times with increasing delays
+	maxAttempts := 3
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := c.cfClient.DeleteRecord(ctx, extractZone(domain), record.toProvidersRecord())
+		cancel()
 
-	if err := c.cfClient.DeleteRecord(ctx, extractZone(domain), record.toProvidersRecord()); err != nil {
+		if err == nil {
+			c.logger.Info("Successfully cleaned up ACME challenge TXT record",
+				zap.String("domain", domain),
+				zap.String("record_name", recordName),
+				zap.Int("attempt", attempt))
+			return nil
+		}
+
 		c.logger.Warn("Failed to cleanup DNS challenge record",
 			zap.String("domain", domain),
+			zap.String("record_name", recordName),
+			zap.Int("attempt", attempt),
+			zap.Int("max_attempts", maxAttempts),
 			zap.Error(err))
+
+		if attempt < maxAttempts {
+			delay := time.Duration(attempt) * 5 * time.Second
+			c.logger.Debug("Retrying TXT record cleanup",
+				zap.String("domain", domain),
+				zap.Duration("delay", delay))
+			time.Sleep(delay)
+		}
 	}
 
-	return nil
+	// Log final failure but don't return error to avoid breaking certificate flow
+	c.logger.Error("Failed to cleanup ACME challenge TXT record after all attempts",
+		zap.String("domain", domain),
+		zap.String("record_name", recordName),
+		zap.Int("attempts", maxAttempts))
+
+	return nil // Don't fail the certificate process due to cleanup failure
 }
 
 func extractZone(domain string) string {

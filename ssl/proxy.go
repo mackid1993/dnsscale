@@ -156,14 +156,29 @@ func (p *Proxy) Start() error {
 
 	tlsConfig := &tls.Config{
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			p.logger.Info("TLS certificate request",
+				zap.String("requested_domain", hello.ServerName),
+				zap.String("proxy_domain", p.domain),
+				zap.String("client_ip", hello.Conn.RemoteAddr().String()))
+
 			if hello.ServerName != p.domain {
-				return nil, fmt.Errorf("unknown domain: %s", hello.ServerName)
+				p.logger.Error("Domain mismatch in TLS request",
+					zap.String("requested", hello.ServerName),
+					zap.String("expected", p.domain))
+				return nil, fmt.Errorf("unknown domain: %s (expected: %s)", hello.ServerName, p.domain)
 			}
 
 			currentCert, err := p.certMgr.LoadCertificate(p.domain)
 			if err != nil {
+				p.logger.Error("Failed to load certificate",
+					zap.String("domain", p.domain),
+					zap.Error(err))
 				return nil, err
 			}
+
+			p.logger.Debug("Serving certificate",
+				zap.String("domain", p.domain),
+				zap.Time("expires", currentCert.Expires))
 
 			return &currentCert.Certificate, nil
 		},
