@@ -8,15 +8,12 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/pem"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/go-acme/lego/v4/certificate"
-	"github.com/go-acme/lego/v4/challenge/dns01"
 	"github.com/go-acme/lego/v4/lego"
 	"github.com/go-acme/lego/v4/registration"
 	"go.uber.org/zap"
@@ -185,7 +182,7 @@ func (m *Manager) RenewCertificate(ctx context.Context, domain string) (*Certifi
 		Domain:      domain,
 		Certificate: certBytes,
 		PrivateKey:  keyBytes,
-	}, true, false)
+	}, true, false, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to renew certificate: %w", err)
 	}

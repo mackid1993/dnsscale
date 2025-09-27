@@ -131,11 +131,6 @@ func (p *Proxy) Start() error {
 		return nil
 	}
 
-	cert, err := p.certMgr.LoadCertificate(p.domain)
-	if err != nil {
-		return fmt.Errorf("failed to load certificate for %s: %w", p.domain, err)
-	}
-
 	targetURL, err := url.Parse(fmt.Sprintf("http://%s", p.target))
 	if err != nil {
 		return fmt.Errorf("invalid target URL: %w", err)
