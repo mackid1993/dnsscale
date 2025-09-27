@@ -853,6 +853,22 @@ func runDNSScale(config *Config) error {
 			dnsProvider,
 		)
 
+		// Override default Go DNS resolver to use our configured resolvers
+		if len(config.SSL.DNSResolvers) > 0 {
+			net.DefaultResolver = &net.Resolver{
+				PreferGo: true,
+				Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+					// Use the first configured resolver as the system default
+					d := net.Dialer{
+						Timeout: time.Second * 10,
+					}
+					return d.DialContext(ctx, network, config.SSL.DNSResolvers[0])
+				},
+			}
+			logger.Info("Overrode system DNS resolver",
+				zap.Strings("resolvers", config.SSL.DNSResolvers))
+		}
+
 		// Initialize SSL manager
 		var err error
 		sslManager, err = ssl.NewManager(

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-acme/lego/v4/certificate"
@@ -89,6 +90,10 @@ func NewManager(logger *zap.Logger, dnsProvider DNS01Provider, email string, sta
 }
 
 func (m *Manager) initACMEClient() error {
+	// Set environment variables for lego to use our DNS resolvers
+	os.Setenv("LEGO_DNS_RESOLVERS", strings.Join(m.dnsResolvers, ","))
+	os.Setenv("LEGO_DISABLE_CNAME_SUPPORT", "true")
+
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return fmt.Errorf("failed to generate private key: %w", err)
