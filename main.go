@@ -851,11 +851,11 @@ func (r *DNSReconciler) processSSLCertificate(ctx context.Context, domain string
 	}
 
 	// Try to load existing certificate first
-	cert, err := r.sslManager.LoadCertificate(domain)
+	_, err := r.sslManager.LoadCertificate(domain)
 	if err != nil {
 		// Certificate doesn't exist, obtain a new one
 		r.logger.Info("Obtaining new SSL certificate", zap.String("domain", domain))
-		cert, err = r.sslManager.ObtainCertificate(ctx, domain)
+		_, err = r.sslManager.ObtainCertificate(ctx, domain)
 		if err != nil {
 			// Don't clean up - just return error for retry
 			return fmt.Errorf("failed to obtain certificate for %s: %w", domain, err)
