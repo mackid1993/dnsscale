@@ -84,7 +84,10 @@ func (c *CloudflareDNSProvider) Present(domain, token, keyAuth string) error {
 		zap.String("domain", domain),
 		zap.String("record_name", recordName))
 
-	time.Sleep(10 * time.Second)
+	// Wait longer for Cloudflare propagation to authoritative nameservers
+	c.logger.Info("Waiting for TXT record propagation to Cloudflare nameservers",
+		zap.String("record_name", recordName))
+	time.Sleep(60 * time.Second)
 	return nil
 }
 

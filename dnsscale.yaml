@@ -39,7 +39,7 @@ ssl:
   # DNS resolvers to use for ACME challenges (avoids Tailscale's 100.100.100.100)
   dns_resolvers: ["1.1.1.1:53", "8.8.8.8:53"]
   # Time to wait for DNS propagation in seconds
-  propagation_timeout: 120
+  propagation_timeout: 300
   # Skip DNS propagation requirements (not recommended)
   disable_propagation_check: false
 
