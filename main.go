@@ -686,7 +686,7 @@ func runDNSScale(config *Config) error {
 
 		// Initialize SSL manager
 		var err error
-		sslManager, err = ssl.NewManager(logger, sslDNSProvider, "", false) // Use production Let's Encrypt
+		sslManager, err = ssl.NewManager(logger, sslDNSProvider, config.SSL.Email, false) // Use production Let's Encrypt
 		if err != nil {
 			logger.Fatal("Failed to initialize SSL manager", zap.Error(err))
 		}

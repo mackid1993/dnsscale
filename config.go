@@ -53,7 +53,8 @@ type CloudflareConfig struct {
 
 // SSLConfig holds SSL certificate configuration
 type SSLConfig struct {
-	Enabled bool `mapstructure:"enabled" yaml:"enabled"`
+	Enabled bool   `mapstructure:"enabled" yaml:"enabled"`
+	Email   string `mapstructure:"email" yaml:"email"`
 }
 
 // AppConfig holds general application configuration
@@ -140,6 +141,17 @@ func (c *Config) Validate() error {
 			c.Logging.Format = "console" // Set default
 		} else {
 			return fmt.Errorf("invalid logging format: %s (supported: %v)", c.Logging.Format, validFormats)
+		}
+	}
+
+	// Validate SSL configuration
+	if c.SSL.Enabled {
+		if c.SSL.Email == "" {
+			return fmt.Errorf("ssl.email is required when SSL is enabled")
+		}
+		// Basic email validation
+		if !strings.Contains(c.SSL.Email, "@") || !strings.Contains(c.SSL.Email, ".") {
+			return fmt.Errorf("ssl.email must be a valid email address")
 		}
 	}
 
