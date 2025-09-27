@@ -672,10 +672,7 @@ func runDNSScale(config *Config) error {
 		logger.Info("SSL enabled, initializing certificate manager")
 
 		// Create DNS provider for ACME challenges
-		var cfProvider interface{}
-		if config.DNS.Provider == "cloudflare" {
-			cfProvider = dnsProvider
-		} else {
+		if config.DNS.Provider != "cloudflare" {
 			logger.Fatal("SSL is only supported with Cloudflare DNS provider")
 		}
 
@@ -684,7 +681,7 @@ func runDNSScale(config *Config) error {
 			config.DNS.Cloudflare.APIToken,
 			config.DNS.ZoneID,
 			logger,
-			cfProvider,
+			dnsProvider,
 		)
 
 		// Initialize SSL manager

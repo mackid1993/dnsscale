@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jaxxstorm/dnsscale/providers"
 	"go.uber.org/zap"
 )
 
@@ -13,10 +14,7 @@ type CloudflareDNSProvider struct {
 	apiToken string
 	zoneID   string
 	logger   *zap.Logger
-	cfClient interface {
-		CreateRecord(ctx context.Context, zone string, record DNSRecord) error
-		DeleteRecord(ctx context.Context, zone string, record DNSRecord) error
-	}
+	cfClient providers.DNSProvider
 }
 
 type DNSRecord struct {
@@ -26,15 +24,32 @@ type DNSRecord struct {
 	TTL   int64
 }
 
-func NewCloudflareDNSProvider(apiToken, zoneID string, logger *zap.Logger, cfClient interface{}) *CloudflareDNSProvider {
+// Convert ssl.DNSRecord to providers.DNSRecord
+func (r DNSRecord) toProvidersRecord() providers.DNSRecord {
+	return providers.DNSRecord{
+		Name:  r.Name,
+		Type:  r.Type,
+		Value: r.Value,
+		TTL:   r.TTL,
+	}
+}
+
+// Convert providers.DNSRecord to ssl.DNSRecord
+func fromProvidersRecord(r providers.DNSRecord) DNSRecord {
+	return DNSRecord{
+		Name:  r.Name,
+		Type:  r.Type,
+		Value: r.Value,
+		TTL:   r.TTL,
+	}
+}
+
+func NewCloudflareDNSProvider(apiToken, zoneID string, logger *zap.Logger, cfClient providers.DNSProvider) *CloudflareDNSProvider {
 	return &CloudflareDNSProvider{
 		apiToken: apiToken,
 		zoneID:   zoneID,
 		logger:   logger,
-		cfClient: cfClient.(interface {
-			CreateRecord(ctx context.Context, zone string, record DNSRecord) error
-			DeleteRecord(ctx context.Context, zone string, record DNSRecord) error
-		}),
+		cfClient: cfClient,
 	}
 }
 
@@ -56,7 +71,7 @@ func (c *CloudflareDNSProvider) Present(domain, token, keyAuth string) error {
 		zap.String("record_name", recordName),
 		zap.String("token", token))
 
-	if err := c.cfClient.CreateRecord(ctx, extractZone(domain), record); err != nil {
+	if err := c.cfClient.CreateRecord(ctx, extractZone(domain), record.toProvidersRecord()); err != nil {
 		return fmt.Errorf("failed to create DNS challenge record: %w", err)
 	}
 
@@ -81,7 +96,7 @@ func (c *CloudflareDNSProvider) CleanUp(domain, token, keyAuth string) error {
 		zap.String("domain", domain),
 		zap.String("record_name", recordName))
 
-	if err := c.cfClient.DeleteRecord(ctx, extractZone(domain), record); err != nil {
+	if err := c.cfClient.DeleteRecord(ctx, extractZone(domain), record.toProvidersRecord()); err != nil {
 		c.logger.Warn("Failed to cleanup DNS challenge record",
 			zap.String("domain", domain),
 			zap.Error(err))
